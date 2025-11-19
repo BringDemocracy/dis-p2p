@@ -1,3 +1,4 @@
+
 // We use a configuration that relies on Google's public STUN servers to punch through NATs.
 export const rtcConfig: RTCConfiguration = {
   iceServers: [
@@ -11,13 +12,20 @@ export const generateConnectionId = () => {
 };
 
 // Helper to compress SDP for easier copy-pasting (simple base64)
-export const encodeSDP = (sdp: string | undefined): string => {
-  if (!sdp) return "";
-  return btoa(JSON.stringify(sdp));
+export const encodeSDP = (data: any): string => {
+  if (!data) return "";
+  try {
+    // data is usually an RTCSessionDescription object
+    return btoa(JSON.stringify(data));
+  } catch (e) {
+    console.error("Error encoding SDP", e);
+    return "";
+  }
 };
 
 export const decodeSDP = (encoded: string): any => {
   try {
+    // Returns the RTCSessionDescription object
     return JSON.parse(atob(encoded));
   } catch (e) {
     console.error("Invalid SDP code", e);

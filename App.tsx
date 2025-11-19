@@ -46,7 +46,8 @@ export default function App() {
     pc.onicecandidate = (event) => {
       // In a real manual copy-paste scenario, we wait for all candidates (null) to generate a single "blob"
       if (event.candidate === null) {
-        setLocalOffer(encodeSDP(JSON.stringify(pc.localDescription)));
+        // FIX: Pass the object directly. encodeSDP now handles the stringify.
+        setLocalOffer(encodeSDP(pc.localDescription));
       }
     };
 
@@ -88,9 +89,14 @@ export default function App() {
     const remoteDesc = decodeSDP(remoteOfferCode);
     if (!remoteDesc) return alert("Invalid code");
 
-    await pc.setRemoteDescription(remoteDesc);
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+    try {
+      await pc.setRemoteDescription(remoteDesc);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+    } catch (e) {
+      console.error("Error setting remote description:", e);
+      alert("Failed to accept invite. Code might be invalid.");
+    }
   };
 
   const completeConnection = async (remoteAnswerCode: string) => {

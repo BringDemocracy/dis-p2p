@@ -1,4 +1,3 @@
-
 export enum MessageType {
   TEXT = 'TEXT',
   SYSTEM = 'SYSTEM'
@@ -29,4 +28,11 @@ export interface PeerConnectionState {
   status: ConnectionStatus;
   connectionId: string | null;
   error: string | null;
+}
+
+export interface AuthResponse {
+  success: boolean;
+  error?: string;
+  friendCode?: string;
+  history?: Message[];
 }

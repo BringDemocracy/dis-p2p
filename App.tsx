@@ -1,18 +1,21 @@
-
 import React, { useState, useEffect, useRef } from 'react';
-import { Message, MessageType, ConnectionStatus, ChatMode } from './types';
+import { Message, MessageType, ConnectionStatus, ChatMode, AuthResponse } from './types';
 import { MessageList } from './components/MessageList';
 import { ConnectionModal } from './components/ConnectionModal';
 import { LoginModal } from './components/LoginModal';
 import { encodeSDP, decodeSDP, rtcConfig } from './utils/webrtc';
+import { io, Socket } from 'socket.io-client';
+
+// Initialize socket outside component to avoid re-creation
+let socket: Socket | null = null;
 
 export default function App() {
   // -- App State --
   const [chatMode, setChatMode] = useState<ChatMode>(ChatMode.P2P);
-  const [username, setUsername] = useState<string | null>(localStorage.getItem('nexus_username'));
+  const [username, setUsername] = useState<string | null>(null);
+  const [friendCode, setFriendCode] = useState<string | null>(null);
   
   // -- Messages State --
-  // P2P messages are ephemeral (RAM only)
   const [p2pMessages, setP2pMessages] = useState<Message[]>([
     {
       id: 'welcome-p2p',
@@ -23,44 +26,33 @@ export default function App() {
     }
   ]);
 
-  // Server messages are persistent (LocalStorage)
-  const [serverMessages, setServerMessages] = useState<Message[]>(() => {
-    const saved = localStorage.getItem('nexus_server_messages');
-    return saved ? JSON.parse(saved) : [{
+  const [serverMessages, setServerMessages] = useState<Message[]>([
+    {
       id: 'welcome-server',
       senderId: 'system',
-      content: 'Welcome to Server Mode. History is saved locally.',
+      content: 'Please login to access the server.',
       timestamp: Date.now(),
       type: MessageType.SYSTEM
-    }];
-  });
+    }
+  ]);
 
   const [inputText, setInputText] = useState('');
   
   // -- P2P Specific State --
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.DISCONNECTED);
   const [isConnectionModalOpen, setIsConnectionModalOpen] = useState(false);
-  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [localOffer, setLocalOffer] = useState('');
   const [isHost, setIsHost] = useState(true);
   
+  // -- Server Specific State --
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [serverConnected, setServerConnected] = useState(false);
+
   // Refs for WebRTC
   const peerConnection = useRef<RTCPeerConnection | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
-
-  // -- Effects --
-
-  // Persist Server Messages
-  useEffect(() => {
-    localStorage.setItem('nexus_server_messages', JSON.stringify(serverMessages));
-  }, [serverMessages]);
-
-  // Persist Username
-  useEffect(() => {
-    if (username) {
-      localStorage.setItem('nexus_username', username);
-    }
-  }, [username]);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // -- Logic: Mode Switching --
 
@@ -72,20 +64,51 @@ export default function App() {
     }
   };
 
-  const handleLogin = (user: string) => {
-    setUsername(user);
-    setIsLoginModalOpen(false);
-    setChatMode(ChatMode.SERVER);
+  const handleLogin = (user: string, pass: string) => {
+    setLoginError(null);
     
-    // Add a join message if it's a fresh login session
-    const joinMsg: Message = {
-      id: Math.random().toString(36),
-      senderId: 'system',
-      content: `User ${user} logged into the server channel.`,
-      timestamp: Date.now(),
-      type: MessageType.SYSTEM
-    };
-    setServerMessages(prev => [...prev, joinMsg]);
+    // Initialize socket if not already done
+    if (!socket) {
+        // Connect to the backend running on port 3001 (via proxy in dev or direct)
+        socket = io(); 
+    }
+
+    socket.connect();
+
+    socket.emit('login', { username: user, password: pass }, (response: AuthResponse) => {
+      if (response.success) {
+        setUsername(user);
+        setFriendCode(response.friendCode || null);
+        
+        if (response.history) {
+            setServerMessages(response.history);
+        }
+
+        setIsLoginModalOpen(false);
+        setChatMode(ChatMode.SERVER);
+        setServerConnected(true);
+
+        // Setup listeners
+        socket?.on('new_message', (msg: Message) => {
+            setServerMessages(prev => [...prev, msg]);
+        });
+
+        socket?.on('system_message', (data: {content: string}) => {
+            const msg: Message = {
+                id: Math.random().toString(),
+                senderId: 'system',
+                content: data.content,
+                timestamp: Date.now(),
+                type: MessageType.SYSTEM
+            };
+            setServerMessages(prev => [...prev, msg]);
+        });
+
+      } else {
+        setLoginError(response.error || 'Login failed');
+        socket?.disconnect();
+      }
+    });
   };
 
   // -- Logic: WebRTC (P2P) --
@@ -174,7 +197,6 @@ export default function App() {
     };
     dc.onmessage = (e) => {
       const data = JSON.parse(e.data);
-      // Received P2P messages always go to P2P state
       setP2pMessages(prev => [...prev, { ...data, senderId: 'peer' }]);
     };
   };
@@ -213,13 +235,17 @@ export default function App() {
       if (dataChannel.current && dataChannel.current.readyState === 'open') {
         dataChannel.current.send(JSON.stringify(newMessage));
       } else {
-        // If trying to chat in P2P without connection
         if (status !== ConnectionStatus.CONNECTED) {
             addSystemMessage("Message not sent: No peer connected.", ChatMode.P2P);
         }
       }
     } else {
-      // Handle Server Send
+      // Handle Server Send via Socket
+      if (!socket || !serverConnected) {
+        addSystemMessage("Error: Not connected to server", ChatMode.SERVER);
+        return;
+      }
+
       const newMessage: Message = {
         id: Math.random().toString(36),
         senderId: username || 'Anonymous',
@@ -228,8 +254,15 @@ export default function App() {
         timestamp: Date.now(),
         type: MessageType.TEXT
       };
-      setServerMessages(prev => [...prev, newMessage]);
-      // In a real app, we would POST to an API here.
+      
+      // Optimistic update? No, let's wait for server echo for real-time feel usually, 
+      // but for responsiveness we can append local. 
+      // However, with socket.io broadcast, we usually get it back. 
+      // To avoid duplicate, server will broadcast to everyone including sender, 
+      // or we append local and filter incoming. 
+      // Simple way: Append local, don't process own ID from socket.
+      // BUT simpler for chat: Emit, server broadcasts to ALL, including me.
+      socket.emit('server_message', newMessage);
     }
 
     setInputText('');
@@ -263,7 +296,7 @@ export default function App() {
             </svg>
           </button>
            <div className="absolute left-16 top-2 bg-black text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-50">
-             Server (Saved)
+             Global Server Chat
           </div>
           {chatMode === ChatMode.SERVER && <div className="absolute -left-1 top-3 w-1 h-6 bg-white rounded-r-full"></div>}
         </div>
@@ -310,7 +343,7 @@ export default function App() {
                     )
                 ) : (
                   <span className="ml-3 px-2 py-0.5 rounded text-[10px] font-bold bg-[#5865F2]/20 text-[#5865F2] border border-[#5865F2]/30 flex-shrink-0">
-                    HISTORY SAVED
+                    LIVE SERVER
                   </span>
                 )}
             </div>
@@ -324,9 +357,17 @@ export default function App() {
                   </div>
                 )}
                 {chatMode === ChatMode.SERVER && username && (
-                  <div className="flex items-center text-xs text-gray-400 bg-[#1e1f22] px-2 py-1 rounded">
-                    <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
-                    {username}
+                  <div className="flex items-center gap-3">
+                    {friendCode && (
+                        <div className="hidden md:flex items-center text-xs text-gray-400 bg-[#1e1f22] px-2 py-1 rounded border border-gray-700">
+                            <span className="uppercase tracking-wide mr-1 text-[10px] font-bold">Friend Code:</span>
+                            <span className="font-mono text-[#5865F2] select-all">{friendCode}</span>
+                        </div>
+                    )}
+                    <div className="flex items-center text-xs text-gray-400 bg-[#1e1f22] px-2 py-1 rounded">
+                        <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                        {username}
+                    </div>
                   </div>
                 )}
             </div>
@@ -356,7 +397,7 @@ export default function App() {
                     ? (status === ConnectionStatus.CONNECTED ? "Message @Peer" : "Waiting for connection...") 
                     : `Message #${username || 'server'}`
                 }
-                disabled={chatMode === ChatMode.P2P && status !== ConnectionStatus.CONNECTED}
+                disabled={(chatMode === ChatMode.P2P && status !== ConnectionStatus.CONNECTED)}
                 className="w-full bg-transparent text-gray-200 outline-none placeholder-gray-500 disabled:opacity-50 disabled:cursor-not-allowed"
               />
             </form>
@@ -380,6 +421,7 @@ export default function App() {
         isOpen={isLoginModalOpen}
         onLogin={handleLogin}
         onCancel={() => setChatMode(ChatMode.P2P)}
+        error={loginError}
       />
     </div>
   );

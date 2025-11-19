@@ -4,9 +4,14 @@ export enum MessageType {
   SYSTEM = 'SYSTEM'
 }
 
+export enum ChatMode {
+  P2P = 'P2P',
+  SERVER = 'SERVER'
+}
+
 export interface Message {
   id: string;
-  senderId: string; // 'me' | 'peer' | 'system'
+  senderId: string; // 'me' | 'peer' | 'system' | username
   content: string;
   timestamp: number;
   type: MessageType;

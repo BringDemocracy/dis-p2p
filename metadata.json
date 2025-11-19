@@ -1,5 +1,5 @@
 {
   "name": "Nexus P2P Secure Chat",
-  "description": "A serverless, end-to-end encrypted P2P messenger with Discord-like aesthetics. Features manual WebRTC signaling for zero-trust connectivity.",
+  "description": "A serverless P2P messenger with an optional persistent local server mode. Discord-like aesthetics.",
   "requestFramePermissions": []
 }

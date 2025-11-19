@@ -1,36 +1,96 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Message, MessageType, ConnectionStatus } from './types';
+import { Message, MessageType, ConnectionStatus, ChatMode } from './types';
 import { MessageList } from './components/MessageList';
 import { ConnectionModal } from './components/ConnectionModal';
+import { LoginModal } from './components/LoginModal';
 import { encodeSDP, decodeSDP, rtcConfig } from './utils/webrtc';
 
 export default function App() {
-  // -- State --
-  const [messages, setMessages] = useState<Message[]>([
+  // -- App State --
+  const [chatMode, setChatMode] = useState<ChatMode>(ChatMode.P2P);
+  const [username, setUsername] = useState<string | null>(localStorage.getItem('nexus_username'));
+  
+  // -- Messages State --
+  // P2P messages are ephemeral (RAM only)
+  const [p2pMessages, setP2pMessages] = useState<Message[]>([
     {
-      id: 'welcome',
+      id: 'welcome-p2p',
       senderId: 'system',
-      content: 'Welcome to Nexus P2P. Encrypted, serverless communication.',
+      content: 'Welcome to P2P Mode. Messages are end-to-end encrypted and not saved.',
       timestamp: Date.now(),
       type: MessageType.SYSTEM
     }
   ]);
+
+  // Server messages are persistent (LocalStorage)
+  const [serverMessages, setServerMessages] = useState<Message[]>(() => {
+    const saved = localStorage.getItem('nexus_server_messages');
+    return saved ? JSON.parse(saved) : [{
+      id: 'welcome-server',
+      senderId: 'system',
+      content: 'Welcome to Server Mode. History is saved locally.',
+      timestamp: Date.now(),
+      type: MessageType.SYSTEM
+    }];
+  });
+
   const [inputText, setInputText] = useState('');
-  const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.DISCONNECTED);
-  const [isModalOpen, setIsModalOpen] = useState(false);
   
-  // WebRTC State
+  // -- P2P Specific State --
+  const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.DISCONNECTED);
+  const [isConnectionModalOpen, setIsConnectionModalOpen] = useState(false);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [localOffer, setLocalOffer] = useState('');
   const [isHost, setIsHost] = useState(true);
   
-  // Refs for persistence without re-renders
+  // Refs for WebRTC
   const peerConnection = useRef<RTCPeerConnection | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
 
-  // -- WebRTC Logic --
+  // -- Effects --
 
-  const cleanup = () => {
+  // Persist Server Messages
+  useEffect(() => {
+    localStorage.setItem('nexus_server_messages', JSON.stringify(serverMessages));
+  }, [serverMessages]);
+
+  // Persist Username
+  useEffect(() => {
+    if (username) {
+      localStorage.setItem('nexus_username', username);
+    }
+  }, [username]);
+
+  // -- Logic: Mode Switching --
+
+  const handleModeSwitch = (mode: ChatMode) => {
+    if (mode === ChatMode.SERVER && !username) {
+      setIsLoginModalOpen(true);
+    } else {
+      setChatMode(mode);
+    }
+  };
+
+  const handleLogin = (user: string) => {
+    setUsername(user);
+    setIsLoginModalOpen(false);
+    setChatMode(ChatMode.SERVER);
+    
+    // Add a join message if it's a fresh login session
+    const joinMsg: Message = {
+      id: Math.random().toString(36),
+      senderId: 'system',
+      content: `User ${user} logged into the server channel.`,
+      timestamp: Date.now(),
+      type: MessageType.SYSTEM
+    };
+    setServerMessages(prev => [...prev, joinMsg]);
+  };
+
+  // -- Logic: WebRTC (P2P) --
+
+  const cleanupP2P = () => {
     dataChannel.current?.close();
     peerConnection.current?.close();
     dataChannel.current = null;
@@ -40,26 +100,23 @@ export default function App() {
   };
 
   const setupPeerConnection = () => {
-    cleanup();
+    cleanupP2P();
     const pc = new RTCPeerConnection(rtcConfig);
     
     pc.onicecandidate = (event) => {
-      // In a real manual copy-paste scenario, we wait for all candidates (null) to generate a single "blob"
       if (event.candidate === null) {
-        // FIX: Pass the object directly. encodeSDP now handles the stringify.
         setLocalOffer(encodeSDP(pc.localDescription));
       }
     };
 
     pc.onconnectionstatechange = () => {
-      console.log("Connection State:", pc.connectionState);
       if (pc.connectionState === 'connected') {
         setStatus(ConnectionStatus.CONNECTED);
-        setIsModalOpen(false);
-        addSystemMessage('Secure Peer Connection Established. Channel Open.');
+        setIsConnectionModalOpen(false);
+        addSystemMessage('Secure Peer Connection Established. Channel Open.', ChatMode.P2P);
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         setStatus(ConnectionStatus.DISCONNECTED);
-        addSystemMessage('Connection lost.');
+        addSystemMessage('Connection lost.', ChatMode.P2P);
       }
     };
 
@@ -69,7 +126,6 @@ export default function App() {
 
   const generateOffer = async () => {
     const pc = setupPeerConnection();
-    // Host creates data channel
     const dc = pc.createDataChannel("chat");
     setupDataChannel(dc);
     dataChannel.current = dc;
@@ -118,42 +174,65 @@ export default function App() {
     };
     dc.onmessage = (e) => {
       const data = JSON.parse(e.data);
-      setMessages(prev => [...prev, { ...data, senderId: 'peer' }]);
+      // Received P2P messages always go to P2P state
+      setP2pMessages(prev => [...prev, { ...data, senderId: 'peer' }]);
     };
   };
 
-  // -- UI Handlers --
+  // -- Logic: Messaging --
 
-  const addSystemMessage = (text: string) => {
-    setMessages(prev => [...prev, {
+  const addSystemMessage = (text: string, mode: ChatMode) => {
+    const msg = {
       id: Math.random().toString(36),
       senderId: 'system',
       content: text,
       timestamp: Date.now(),
       type: MessageType.SYSTEM
-    }]);
+    };
+    
+    if (mode === ChatMode.P2P) setP2pMessages(prev => [...prev, msg]);
+    else setServerMessages(prev => [...prev, msg]);
   };
 
   const handleSendMessage = (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!inputText.trim()) return;
 
-    const newMessage: Message = {
-      id: Math.random().toString(36),
-      senderId: 'me',
-      content: inputText,
-      timestamp: Date.now(),
-      type: MessageType.TEXT
-    };
+    if (chatMode === ChatMode.P2P) {
+      // Handle P2P Send
+      const newMessage: Message = {
+        id: Math.random().toString(36),
+        senderId: 'me',
+        content: inputText,
+        timestamp: Date.now(),
+        type: MessageType.TEXT
+      };
 
-    // Update local UI
-    setMessages(prev => [...prev, newMessage]);
-    setInputText('');
-
-    // Send over P2P if connected
-    if (dataChannel.current && dataChannel.current.readyState === 'open') {
-      dataChannel.current.send(JSON.stringify(newMessage));
+      setP2pMessages(prev => [...prev, newMessage]);
+      
+      if (dataChannel.current && dataChannel.current.readyState === 'open') {
+        dataChannel.current.send(JSON.stringify(newMessage));
+      } else {
+        // If trying to chat in P2P without connection
+        if (status !== ConnectionStatus.CONNECTED) {
+            addSystemMessage("Message not sent: No peer connected.", ChatMode.P2P);
+        }
+      }
+    } else {
+      // Handle Server Send
+      const newMessage: Message = {
+        id: Math.random().toString(36),
+        senderId: username || 'Anonymous',
+        senderName: username || 'Anonymous',
+        content: inputText,
+        timestamp: Date.now(),
+        type: MessageType.TEXT
+      };
+      setServerMessages(prev => [...prev, newMessage]);
+      // In a real app, we would POST to an API here.
     }
+
+    setInputText('');
   };
 
   const onProcessRemoteCode = (code: string) => {
@@ -164,31 +243,49 @@ export default function App() {
     }
   };
 
+  // -- Render Helpers --
+
+  const currentMessages = chatMode === ChatMode.P2P ? p2pMessages : serverMessages;
+
   return (
     <div className="flex h-screen overflow-hidden bg-[#313338]">
-      {/* Sidebar (Discord-style) */}
-      <div className="w-[72px] bg-[#1e1f22] flex flex-col items-center py-3 space-y-2 flex-shrink-0">
-        {/* Home / P2P Icon */}
-        <div className="w-12 h-12 bg-[#5865F2] rounded-2xl flex items-center justify-center text-white hover:rounded-xl transition-all cursor-pointer shadow-lg mb-2">
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-          </svg>
-        </div>
+      {/* Sidebar */}
+      <div className="w-[72px] bg-[#1e1f22] flex flex-col items-center py-3 space-y-4 flex-shrink-0">
         
+        {/* Server Mode Button */}
+        <div className="group relative">
+           <button 
+            onClick={() => handleModeSwitch(ChatMode.SERVER)}
+            className={`w-12 h-12 rounded-3xl flex items-center justify-center transition-all hover:rounded-xl group-hover:bg-[#5865F2] group-hover:text-white ${chatMode === ChatMode.SERVER ? 'bg-[#5865F2] text-white rounded-xl' : 'bg-[#313338] text-gray-400'}`}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            </svg>
+          </button>
+           <div className="absolute left-16 top-2 bg-black text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-50">
+             Server (Saved)
+          </div>
+          {chatMode === ChatMode.SERVER && <div className="absolute -left-1 top-3 w-1 h-6 bg-white rounded-r-full"></div>}
+        </div>
+
         <div className="w-8 h-[2px] bg-[#35363c] rounded-lg mx-auto"></div>
 
-        {/* Connection Button */}
-        <button 
-          onClick={() => setIsModalOpen(true)}
-          className={`w-12 h-12 rounded-3xl flex items-center justify-center transition-all hover:rounded-xl group relative ${status === ConnectionStatus.CONNECTED ? 'bg-green-500 text-white' : 'bg-[#313338] text-green-500 hover:bg-green-500 hover:text-white'}`}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-          </svg>
-          <div className="absolute left-14 bg-black text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-50">
-             {status === ConnectionStatus.CONNECTED ? 'Connection Details' : 'Start Connection'}
+        {/* P2P Mode Button */}
+        <div className="group relative">
+          <button 
+            onClick={() => handleModeSwitch(ChatMode.P2P)}
+            className={`w-12 h-12 rounded-3xl flex items-center justify-center transition-all hover:rounded-xl group-hover:bg-green-600 group-hover:text-white ${chatMode === ChatMode.P2P ? 'bg-green-600 text-white rounded-xl' : 'bg-[#313338] text-gray-400'}`}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+          </button>
+          <div className="absolute left-16 top-2 bg-black text-white text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-50">
+             P2P (Encrypted)
           </div>
-        </button>
+           {chatMode === ChatMode.P2P && <div className="absolute -left-1 top-3 w-1 h-6 bg-white rounded-r-full"></div>}
+        </div>
+
       </div>
 
       {/* Main Channel Area */}
@@ -197,39 +294,54 @@ export default function App() {
         <div className="h-12 shadow-sm border-b border-[#26272d] flex items-center px-4 justify-between bg-[#313338] flex-shrink-0">
             <div className="flex items-center overflow-hidden">
                 <div className="text-gray-400 mr-2 text-xl">#</div>
-                <span className="font-bold text-white truncate">secure-p2p-chat</span>
-                {status === ConnectionStatus.CONNECTED ? (
-                     <span className="ml-3 px-2 py-0.5 rounded text-[10px] font-bold bg-green-600/20 text-green-400 border border-green-600/30 flex-shrink-0">
-                       ENCRYPTED
-                     </span>
+                <span className="font-bold text-white truncate">
+                  {chatMode === ChatMode.P2P ? 'secure-p2p-direct' : 'public-server-chat'}
+                </span>
+                
+                {chatMode === ChatMode.P2P ? (
+                    status === ConnectionStatus.CONNECTED ? (
+                        <span className="ml-3 px-2 py-0.5 rounded text-[10px] font-bold bg-green-600/20 text-green-400 border border-green-600/30 flex-shrink-0">
+                          ENCRYPTED
+                        </span>
+                    ) : (
+                        <span className="ml-3 px-2 py-0.5 rounded text-[10px] font-bold bg-gray-600/20 text-gray-400 border border-gray-600/30 flex-shrink-0">
+                          OFFLINE
+                        </span>
+                    )
                 ) : (
-                    <span className="ml-3 px-2 py-0.5 rounded text-[10px] font-bold bg-gray-600/20 text-gray-400 border border-gray-600/30 flex-shrink-0">
-                       OFFLINE
-                     </span>
+                  <span className="ml-3 px-2 py-0.5 rounded text-[10px] font-bold bg-[#5865F2]/20 text-[#5865F2] border border-[#5865F2]/30 flex-shrink-0">
+                    HISTORY SAVED
+                  </span>
                 )}
             </div>
             
             <div className="flex items-center space-x-4">
-                <div className="text-gray-400 hover:text-gray-200 cursor-pointer" onClick={() => setIsModalOpen(true)} title="Connection Settings">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                </div>
-                 <div className="text-gray-400 hover:text-gray-200 cursor-pointer">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                </div>
+                {chatMode === ChatMode.P2P && (
+                  <div className="text-gray-400 hover:text-gray-200 cursor-pointer" onClick={() => setIsConnectionModalOpen(true)} title="Connection Settings">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                      </svg>
+                  </div>
+                )}
+                {chatMode === ChatMode.SERVER && username && (
+                  <div className="flex items-center text-xs text-gray-400 bg-[#1e1f22] px-2 py-1 rounded">
+                    <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                    {username}
+                  </div>
+                )}
             </div>
         </div>
 
         {/* Messages */}
-        <MessageList messages={messages} />
+        <MessageList messages={currentMessages} />
 
         {/* Input Area */}
         <div className="p-4 pt-0 flex-shrink-0">
           <div className="bg-[#383a40] rounded-lg px-4 py-2.5 flex items-center shadow-inner">
-            <button className="text-gray-400 hover:text-gray-200 mr-4 flex-shrink-0">
+            <button 
+              onClick={() => chatMode === ChatMode.P2P && setIsConnectionModalOpen(true)}
+              className="text-gray-400 hover:text-gray-200 mr-4 flex-shrink-0"
+            >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
@@ -239,33 +351,35 @@ export default function App() {
                 type="text"
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                placeholder={status === ConnectionStatus.CONNECTED 
-                    ? "Message #secure-p2p-chat" 
-                    : "You are offline. Click the + button to connect to a peer."}
-                className="w-full bg-transparent text-gray-200 outline-none placeholder-gray-500"
+                placeholder={
+                  chatMode === ChatMode.P2P 
+                    ? (status === ConnectionStatus.CONNECTED ? "Message @Peer" : "Waiting for connection...") 
+                    : `Message #${username || 'server'}`
+                }
+                disabled={chatMode === ChatMode.P2P && status !== ConnectionStatus.CONNECTED}
+                className="w-full bg-transparent text-gray-200 outline-none placeholder-gray-500 disabled:opacity-50 disabled:cursor-not-allowed"
               />
             </form>
-            <div className="flex items-center space-x-3 ml-2 flex-shrink-0">
-                <button className="text-gray-400 hover:text-gray-200">
-                     <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                     </svg>
-                </button>
-            </div>
           </div>
         </div>
       </div>
 
-      {/* Connection Manager Modal */}
+      {/* Modals */}
       <ConnectionModal 
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
+        isOpen={isConnectionModalOpen}
+        onClose={() => setIsConnectionModalOpen(false)}
         status={status}
         localOffer={localOffer}
         onGenerateOffer={generateOffer}
         onProcessRemote={onProcessRemoteCode}
         isHost={isHost}
         setIsHost={setIsHost}
+      />
+      
+      <LoginModal 
+        isOpen={isLoginModalOpen}
+        onLogin={handleLogin}
+        onCancel={() => setChatMode(ChatMode.P2P)}
       />
     </div>
   );

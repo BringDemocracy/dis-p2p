@@ -1,12 +1,12 @@
+
 export enum MessageType {
   TEXT = 'TEXT',
-  SYSTEM = 'SYSTEM',
-  AI = 'AI'
+  SYSTEM = 'SYSTEM'
 }
 
 export interface Message {
   id: string;
-  senderId: string; // 'me' | 'peer' | 'system' | 'ai'
+  senderId: string; // 'me' | 'peer' | 'system'
   content: string;
   timestamp: number;
   type: MessageType;

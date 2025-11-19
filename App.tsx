@@ -1,9 +1,9 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Message, MessageType, ConnectionStatus } from './types';
 import { MessageList } from './components/MessageList';
 import { ConnectionModal } from './components/ConnectionModal';
 import { encodeSDP, decodeSDP, rtcConfig } from './utils/webrtc';
-import { analyzeChat } from './services/geminiService';
 
 export default function App() {
   // -- State --
@@ -11,7 +11,7 @@ export default function App() {
     {
       id: 'welcome',
       senderId: 'system',
-      content: 'Welcome to Nexus P2P. Secure, serverless communication.',
+      content: 'Welcome to Nexus P2P. Encrypted, serverless communication.',
       timestamp: Date.now(),
       type: MessageType.SYSTEM
     }
@@ -27,9 +27,6 @@ export default function App() {
   // Refs for persistence without re-renders
   const peerConnection = useRef<RTCPeerConnection | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
-
-  // Check for API Key availability
-  const hasApiKey = Boolean(process.env.API_KEY);
 
   // -- WebRTC Logic --
 
@@ -135,19 +132,6 @@ export default function App() {
     e?.preventDefault();
     if (!inputText.trim()) return;
 
-    // Gemini Command Check
-    if (inputText.startsWith('/ai ')) {
-        if (!hasApiKey) {
-           addSystemMessage("AI features are disabled. API Key is missing.");
-           setInputText('');
-           return;
-        }
-        const prompt = inputText.replace('/ai ', '');
-        handleAiRequest(prompt);
-        setInputText('');
-        return;
-    }
-
     const newMessage: Message = {
       id: Math.random().toString(36),
       senderId: 'me',
@@ -163,41 +147,7 @@ export default function App() {
     // Send over P2P if connected
     if (dataChannel.current && dataChannel.current.readyState === 'open') {
       dataChannel.current.send(JSON.stringify(newMessage));
-    } else {
-       // Optional: warn user they are talking to themselves if not connected
-       if (status !== ConnectionStatus.CONNECTED) {
-           // We don't block sending to allow testing UI, but real use needs connection
-       }
     }
-  };
-
-  const handleAiRequest = async (prompt: string) => {
-      const userMsg: Message = {
-          id: Math.random().toString(),
-          senderId: 'me',
-          content: `/ai ${prompt}`,
-          timestamp: Date.now(),
-          type: MessageType.TEXT
-      };
-      setMessages(prev => [...prev, userMsg]);
-
-      const loadingId = Math.random().toString();
-      setMessages(prev => [...prev, {
-          id: loadingId,
-          senderId: 'ai',
-          senderName: 'Gemini',
-          content: 'Thinking...',
-          timestamp: Date.now(),
-          type: MessageType.AI
-      }]);
-
-      const response = await analyzeChat(messages, prompt);
-
-      setMessages(prev => prev.map(m => 
-          m.id === loadingId 
-          ? { ...m, content: response } 
-          : m
-      ));
   };
 
   const onProcessRemoteCode = (code: string) => {
@@ -254,19 +204,7 @@ export default function App() {
             </div>
             
             <div className="flex items-center space-x-4">
-                {hasApiKey && (
-                  <button 
-                      onClick={() => handleAiRequest("Summarize our conversation so far.")}
-                      className="text-gray-300 hover:text-white text-xs flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-800 transition-colors"
-                      title="Ask Gemini to summarize chat"
-                  >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M12.316 3.051a1 1 0 01.633 1.265l-4 12a1 1 0 11-1.898-.632l4-12a1 1 0 011.265-.633zM5.707 6.293a1 1 0 010 1.414L3.414 10l2.293 2.293a1 1 0 11-1.414 1.414l-3-3a1 1 0 010-1.414l3-3a1 1 0 011.414 0zm8.586 0a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 11-1.414-1.414L16.586 10l-2.293-2.293a1 1 0 010-1.414z" clipRule="evenodd" />
-                      </svg>
-                      <span className="hidden sm:inline">Assistant</span>
-                  </button>
-                )}
-                <div className="text-gray-400 hover:text-gray-200 cursor-pointer">
+                <div className="text-gray-400 hover:text-gray-200 cursor-pointer" onClick={() => setIsModalOpen(true)} title="Connection Settings">
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
@@ -296,7 +234,7 @@ export default function App() {
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 placeholder={status === ConnectionStatus.CONNECTED 
-                    ? (hasApiKey ? "Message #secure-p2p-chat (/ai for bot)" : "Message #secure-p2p-chat") 
+                    ? "Message #secure-p2p-chat" 
                     : "You are offline. Click the + button to connect to a peer."}
                 className="w-full bg-transparent text-gray-200 outline-none placeholder-gray-500"
               />
